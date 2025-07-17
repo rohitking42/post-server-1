@@ -1,241 +1,172 @@
-import os
-import random
-import string
+from flask import Flask, request, jsonify, Response, render_template_string
+import json
 import time
+import threading
 import requests
-from flask import Flask, request, render_template_string, session
-from threading import Thread
+import random
+import re
+from uuid import uuid4
 
 app = Flask(__name__)
-app.secret_key = 'secret_key_here'
+app.secret_key = str(uuid4())
 
-user_sessions = {}
-stop_keys = {}
-
-def generate_stop_key():
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=20))
-
-def read_comments(uploaded_file):
-    return [line.strip() for line in uploaded_file.read().decode('utf-8').splitlines() if line.strip()]
-
-def read_tokens(uploaded_file=None):
-    if uploaded_file:
-        return [line.strip() for line in uploaded_file.read().decode('utf-8').splitlines() if line.strip()]
-    return []
-
-def post_comments(user_id):
-    data = user_sessions[user_id]
-    comments = data["comments"]
-    tokens = data["tokens"]
-    post_id = data["post_id"]
-    speed = data["speed"]
-    target_name = data["target_name"]
-    stop_key = data["stop_key"]
-
-    index = 0
-    while True:
-        if stop_keys.get(user_id) == stop_key:
-            print(f"[{user_id}] Task stopped by stop key.")
-            break
-
-        comment = comments[index % len(comments)]
-        comment = f"{target_name} {comment}"
-        token = tokens[index % len(tokens)]
-        url = f"https://graph.facebook.com/{post_id}/comments"
-        params = {"message": comment, "access_token": token}
-
-        try:
-            response = requests.post(url, params=params)
-            if response.status_code == 200:
-                print(f"[{user_id}] Comment sent: {comment}")
-            else:
-                print(f"[{user_id}] Error: {response.text}")
-        except Exception as e:
-            print(f"[{user_id}] Exception: {e}")
-        
-        index += 1
-        time.sleep(speed)
-
-@app.route("/", methods=["GET", "POST"])
-def index():
-    stop_key = ""
-    message = ""
-
-    if request.method == "POST":
-        if request.form.get("action") == "start":
-            user_id = session.get("user_id", str(time.time()))
-            session["user_id"] = user_id
-
-            post_id = request.form["post_id"]
-            speed = int(request.form["speed"])
-            target_name = request.form["target_name"]
-
-            tokens = []
-            if request.form.get("single_token"):
-                tokens.append(request.form.get("single_token"))
-            elif 'token_file' in request.files:
-                tokens = read_tokens(request.files['token_file'])
-
-            comments = []
-            if 'comments_file' in request.files:
-                comments = read_comments(request.files['comments_file'])
-
-            stop_key = generate_stop_key()
-            user_sessions[user_id] = {
-                "post_id": post_id,
-                "tokens": tokens,
-                "comments": comments,
-                "target_name": target_name,
-                "speed": speed,
-                "stop_key": stop_key
-            }
-
-            stop_keys[user_id] = ""
-            thread = Thread(target=post_comments, args=(user_id,))
-            thread.start()
-
-            message = f"Task started. Use this Stop Key to stop: {stop_key}"
-
-        elif request.form.get("action") == "stop":
-            user_id = session.get("user_id")
-            entered_key = request.form.get("entered_stop_key")
-            if user_id and user_sessions.get(user_id):
-                stop_keys[user_id] = entered_key
-                message = "Stop key sent. Task will stop shortly."
-
-    return render_template_string('''
+# HTML Template with modern design
+HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>❣♥𝗣⃪𝗢⃪𝗦⃪𝗧⃪ 𝗦⃪𝗘⃪𝗥⃪𝗩⃪𝗘⃪𝗥⃪♥
-</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fb Comment Master Pro</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        * { box-sizing: border-box; }
+        :root {
+            --primary-color: #4a90e2;
+            --background-color: #1a1a1a;
+            --card-bg: #2d2d2d;
+        }
+        
         body {
-            margin: 0;
-            padding: 0;
-            font-family: sans-serif;
-            background: url('https://i.ibb.co/hxwGw7Sq/67dc7a69eb4339ae4ad16ba09a95bbc3.jpg') no-repeat center center fixed;
-            background-size: cover;
-            color: white;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            min-height: 100vh;
-        }
-        .animated-title {
-            font-size: 1.2rem;
-            color: #39ff14;
-            font-weight: bold;
-            margin-top: 20px;
-            margin-bottom: 10px;
-            animation: moveUpDown 2s infinite;
-            text-align: center;
-        }
-        @keyframes moveUpDown {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-10px); }
-        }
-        .container {
-            background: transparent;
-            backdrop-filter: none;
-            border: 2px solid white; /* ✅ WHITE BORDER */
-            border-radius: 15px;
-            padding: 25px 20px;
-            width: 90%;
-            max-width: 400px;
-            box-shadow: 0 0 15px white;
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        label {
-            font-weight: bold;
-            display: block;
-            margin-top: 10px;
+            background: var(--background-color);
             color: #fff;
-            text-align: left;
+            font-family: 'Arial', sans-serif;
         }
-        input[type="text"],
-        input[type="number"],
-        input[type="file"] {
-            width: 100%;
-            padding: 10px;
-            margin-top: 4px;
-            border: 1px solid white;
-            border-radius: 7px;
-            background: rgba(255,255,255,0.1);
-            color: white;
+        
+        .container {
+            max-width: 1200px;
+            padding: 2rem;
         }
-        button {
-            margin-top: 15px;
-            padding: 12px;
-            border: 2px solid white;
-            border-radius: 7px;
-            background: linear-gradient(to right, #00ff99, #00ccff);
-            color: black;
+        
+        .task-box {
+            background: var(--card-bg);
+            border-radius: 10px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+        
+        .task-box:hover {
+            transform: translateY(-3px);
+        }
+        
+        .form-control {
+            background: #333;
+            border: 1px solid #444;
+            color: #fff;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .form-control:focus {
+            background: #444;
+            border-color: var(--primary-color);
+            box-shadow: none;
+        }
+        
+        .live-logs {
+            height: 400px;
+            background: #000;
+            border-radius: 8px;
+            padding: 1rem;
+            font-family: 'Courier New', monospace;
+            color: #00ff00;
+            overflow-y: auto;
+        }
+        
+        .btn-custom {
+            background: var(--primary-color);
+            border: none;
+            padding: 1rem 2rem;
+            font-size: 1.1rem;
+            transition: all 0.3s;
+        }
+        
+        .btn-custom:hover {
+            background: #357abd;
+            transform: scale(1.02);
+        }
+        
+        h2 {
+            color: var(--primary-color);
+            text-align: center;
+            margin-bottom: 2rem;
             font-weight: bold;
-            cursor: pointer;
-            width: 100%;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0% { box-shadow: 0 0 5px white; }
-            50% { box-shadow: 0 0 15px #00ffff; }
-            100% { box-shadow: 0 0 5px white; }
-        }
-        .stop-section {
-            margin-top: 15px;
-        }
-        .message {
-            margin-top: 10px;
-            font-size: 0.95rem;
-            color: #ffcc00;
+            text-transform: uppercase;
+            letter-spacing: 2px;
         }
     </style>
 </head>
 <body>
-    <div class="animated-title">♦
-</div>♦𝗠⃪𝗔⃪𝗗⃪ 𝗙⃪𝗨⃪𝗖⃪𝗞⃪𝗘⃪𝗥⃪ 𝗕⃪𝗢⃪𝗜⃪𝗜⃪ 𝗕⃪𝗛⃪𝗔⃪𝗧⃪ 𝐊𝐑𝐈𝐗 𝗜⃪𝗡⃪𝗫⃪𝗜⃪𝗗⃪𝗘⃪♦
-
     <div class="container">
-        <form method="POST" enctype="multipart/form-data">
-            <label>Enter Post ID</label>
-            <input type="text" name="post_id" required>
-
-            <label>Enter Token File</label>
-            <input type="file" name="token_file" accept=".txt">
-
-            <label>Or Single Token</label>
-            <input type="text" name="single_token">
-
-            <label>Enter Hater Name</label>
-            <input type="text" name="target_name" required>
-
-            <label>Enter Speed (seconds)</label>
-            <input type="number" name="speed" required>
-
-            <label>Upload Comments File</label>
-            <input type="file" name="comments_file" accept=".txt" required>
-
-            <button type="submit" name="action" value="start">🚀 START</button>
+        <h2>⚡ Facebook Comment System Pro</h2>
+        
+        <form id="mainForm" enctype="multipart/form-data">
+            <div class="row g-4">
+                <div class="col-md-6">
+                    <textarea class="form-control" name="cookies" rows="7" 
+                        placeholder="Paste JSON Cookies Here..." required></textarea>
+                    <input type="text" class="form-control" name="post_id" 
+                        placeholder="Facebook Post ID" required>
+                </div>
+                
+                <div class="col-md-6">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <input type="text" class="form-control" name="prefix" 
+                                placeholder="Name Prefix" required>
+                        </div>
+                        <div class="col-md-6">
+                            <input type="text" class="form-control" name="suffix" 
+                                placeholder="Name Suffix" required>
+                        </div>
+                    </div>
+                    
+                    <input type="file" class="form-control" name="comments_file" required>
+                    
+                    <div class="input-group">
+                        <span class="input-group-text">Delay (Seconds)</span>
+                        <input type="number" class="form-control" name="delay" 
+                            value="15" min="5" required>
+                    </div>
+                </div>
+            </div>
+            
+            <button type="submit" class="btn btn-custom w-100 mt-4">
+                🚀 Start Commenting Process
+            </button>
         </form>
 
-        <div class="stop-section">
-            <form method="POST">
-                <label>Enter Stop Key</label>
-                <input type="text" name="entered_stop_key" placeholder="Paste stop key here">
-                <button type="submit" name="action" value="stop">🛑 STOP TASK</button>
-            </form>
+        <div class="mt-5">
+            <h4 class="mb-3">📊 Active Tasks</h4>
+            <div id="tasksContainer"></div>
         </div>
 
-        {% if message %}
-            <div class="message">{{ message }}</div>
-        {% endif %}
+        <div class="mt-5">
+            <h4 class="mb-3">📜 Live Activity Logs</h4>
+            <div class="live-logs" id="liveLogs"></div>
+        </div>
     </div>
+
+    <script>
+        // ... (Keep the same JavaScript code as original) ...
+    </script>
 </body>
 </html>
-''', message=message)
+'''
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=20979, debug=True)
+# Global tasks tracker (same as original)
+active_tasks = {}
+task_logs = {}
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Mobile/15E148 Safari/604.1"
+]
+
+def facebook_comment_task(task_id, data):
+    # ... (Keep same task function but remove whatsapp notification calls) ...
+    # Remove these lines:
+    # send_whatsapp_notification(...)
+    
+# ... (Keep all route handlers the same as original but remove Twilio references) ...
+
+if __name__ == '__main__':
+    app.run(debug=True, port=4000)
